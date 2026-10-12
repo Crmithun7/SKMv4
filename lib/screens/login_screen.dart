@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/storage_service.dart';
 import '../models/employee.dart';
+import '../utils/error_utils.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -57,7 +58,7 @@ class _LoginScreenState extends State<LoginScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  e.toString().replaceFirst('Exception: ', ''),
+                  friendlyError(e),
                   style: const TextStyle(color: Colors.white, fontSize: 13),
                 ),
               ),

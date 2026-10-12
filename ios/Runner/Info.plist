@@ -29,13 +29,15 @@
 	<key>NSCameraUsageDescription</key>
 	<string>SKMv4 uses the camera to capture your selfie for attendance check-in and check-out.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SKMv4 requires microphone access as part of camera functionality.</string>
+	<string>SKMv4 does not record audio. Microphone access is only requested by the camera component and is not used.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>SKMv4 uses your location to record where you check in and check out.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>SKMv4 uses your location to record where you check in and check out.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SKMv4 may access your photo library to attach images to attendance records.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../models/employee.dart';
 import '../services/storage_service.dart';
+import '../services/sync_queue_service.dart';
+import '../services/sync_service.dart';
 import 'event_screen.dart';
 import 'history_screen.dart';
 import 'profile_screen.dart';
@@ -15,7 +17,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const _kBg      = Color(0xFF080C15);
   static const _kSurface = Color(0xFF0F1625);
   static const _kHigh    = Color(0xFF152035);
@@ -30,12 +32,50 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _checkinTime;
   Uint8List? _decodedCompanyLogo;
   Uint8List? _decodedEmployeeImg;
+  int _pendingSyncCount = 0;
+  bool _syncing = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _decodeImages();
     _loadAttendanceState();
+    _refreshPendingCount();
+    _trySync();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Signal can come back while the app is backgrounded (phone picks up
+    // Wi-Fi again, airplane mode turned off) — catch up as soon as the
+    // employee returns to the app instead of waiting for their next action.
+    if (state == AppLifecycleState.resumed) _trySync();
+  }
+
+  Future<void> _refreshPendingCount() async {
+    final count = await SyncQueueService.count();
+    if (mounted) setState(() => _pendingSyncCount = count);
+  }
+
+  Future<void> _trySync() async {
+    if (_syncing) return;
+    final before = await SyncQueueService.count();
+    if (before == 0) return;
+    if (mounted) setState(() => _syncing = true);
+    try {
+      await SyncService.flush();
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+    await _refreshPendingCount();
+    if (mounted) await _loadAttendanceState();
   }
 
   void _decodeImages() {
@@ -63,7 +103,11 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (_) => EventScreen(employee: widget.employee, flag: flag),
       ),
     );
-    if (result != null) _loadAttendanceState();
+    if (result != null) {
+      _loadAttendanceState();
+      _refreshPendingCount();
+      _trySync();
+    }
   }
 
   void _openProfile() {
@@ -134,6 +178,10 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 24),
               _profileCard(),
+              if (_pendingSyncCount > 0) ...[
+                const SizedBox(height: 16),
+                _pendingSyncBanner(),
+              ],
               const SizedBox(height: 16),
               _statusCard(),
               const SizedBox(height: 16),
@@ -350,6 +398,54 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  // ── Pending sync banner ───────────────────────────────────────────────────
+
+  Widget _pendingSyncBanner() {
+    const warning = Color(0xFFF59E0B);
+    final label = _pendingSyncCount == 1
+        ? '1 attendance record saved offline'
+        : '$_pendingSyncCount attendance records saved offline';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: warning.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: warning.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off_rounded, color: warning, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: const TextStyle(
+                        color: warning, fontSize: 13, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                const Text('Will sync automatically once you have internet',
+                    style: TextStyle(color: _kMuted, fontSize: 11)),
+              ],
+            ),
+          ),
+          if (_syncing)
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: warning),
+            )
+          else
+            GestureDetector(
+              onTap: _trySync,
+              child: const Icon(Icons.refresh_rounded, color: warning, size: 20),
+            ),
         ],
       ),
     );

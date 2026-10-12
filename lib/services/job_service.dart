@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../utils/error_utils.dart';
 import '../models/job.dart';
 
 class JobService {
@@ -9,20 +10,24 @@ class JobService {
     final response = await http.get(
       Uri.parse('$_baseUrl/jobs/$companyCode'),
       headers: {'Content-Type': 'application/json'},
+    ).timeout(
+      const Duration(seconds: 20),
+      onTimeout: () => throw Exception(slowNetworkMessage),
     );
+
+    if (response.statusCode != 200) {
+      throw Exception(serverErrorMessage(response,
+          fallback: "Couldn't load the job list. Please try again."));
+    }
 
     dynamic data;
     try {
       data = jsonDecode(response.body);
     } catch (_) {
-      throw Exception('Server returned an unexpected response. Please try again.');
+      throw Exception(badReplyMessage);
     }
 
-    if (response.statusCode == 200) {
-      final List<dynamic> list = (data is Map ? data['data'] : null) ?? [];
-      return list.map((e) => Job.fromJson(e as Map<String, dynamic>)).toList();
-    } else {
-      throw Exception((data is Map ? data['detail'] : null) ?? 'Failed to fetch jobs');
-    }
+    final List<dynamic> list = (data is Map ? data['data'] : null) ?? [];
+    return list.map((e) => Job.fromJson(e as Map<String, dynamic>)).toList();
   }
 }

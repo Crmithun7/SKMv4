@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../models/employee.dart';
 import '../services/attendance_service.dart';
+import '../utils/error_utils.dart';
 
 class HistoryScreen extends StatefulWidget {
   final Employee employee;
@@ -25,7 +26,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
   List<Map<String, dynamic>> _logs = [];
   bool _loading = true;
   String? _error;
-  DateTime? _selectedDate;
+
+  // Always scoped to a single day — pulling the employee's entire history
+  // on every open doesn't scale, so we default to today and let the date
+  // picker narrow it to any other single day instead of ever fetching all.
+  DateTime _selectedDate = DateTime.now();
+
+  bool get _isToday => _dateToString(_selectedDate) == _dateToString(DateTime.now());
 
   @override
   void initState() {
@@ -36,18 +43,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Future<void> _loadLogs() async {
     setState(() { _loading = true; _error = null; });
     try {
-      final dateStr = _selectedDate == null ? null : _dateToString(_selectedDate!);
       final logs = await AttendanceService.getAttendanceLogs(
         companyCode: widget.employee.companyCode,
         employeeId: widget.employee.employeeId,
-        date: dateStr,
+        date: _dateToString(_selectedDate),
         accessToken: widget.employee.accessToken,
       );
       if (mounted) setState(() { _logs = logs; _loading = false; });
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.toString().replaceFirst('Exception: ', '');
+          _error = friendlyError(e);
           _loading = false;
         });
       }
@@ -57,7 +63,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
       context: context,
-      initialDate: _selectedDate ?? DateTime.now(),
+      initialDate: _selectedDate,
       firstDate: DateTime(2020),
       lastDate: DateTime.now(),
       builder: (ctx, child) => Theme(
@@ -84,8 +90,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
-  void _clearDate() {
-    setState(() => _selectedDate = null);
+  void _resetToToday() {
+    if (_isToday) return;
+    setState(() => _selectedDate = DateTime.now());
     _loadLogs();
   }
 
@@ -104,6 +111,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
     } catch (_) {
       return raw;
     }
+  }
+
+  String _dateLabel(String rawDate) {
+    final now       = DateTime.now();
+    final today     = _dateToString(now);
+    final yesterday = _dateToString(now.subtract(const Duration(days: 1)));
+
+    if (rawDate == today) return 'Today  •  ${_formatDisplayDate(rawDate)}';
+    if (rawDate == yesterday) return 'Yesterday  •  ${_formatDisplayDate(rawDate)}';
+    return _formatDisplayDate(rawDate);
   }
 
   String _formatTime(String? raw) {
@@ -150,24 +167,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     } catch (_) {
       return null;
     }
-  }
-
-  // ── Grouped list items ─────────────────────────────────────────────────────
-
-  // Returns an interleaved list of date-header maps and log maps.
-  List<dynamic> get _listItems {
-    if (_selectedDate != null) return List<dynamic>.from(_logs);
-    final items = <dynamic>[];
-    String? lastDate;
-    for (final log in _logs) {
-      final date = (log['attendance_date'] ?? '').toString();
-      if (date != lastDate) {
-        items.add({'__header': true, 'date': date});
-        lastDate = date;
-      }
-      items.add(log);
-    }
-    return items;
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -230,7 +229,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
   // ── Filter bar ─────────────────────────────────────────────────────────────
 
   Widget _filterBar() {
-    if (_selectedDate == null) return const SizedBox.shrink();
     return Container(
       color: _kSurface,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -251,18 +249,20 @@ class _HistoryScreenState extends State<HistoryScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  _formatDisplayDate(_dateToString(_selectedDate!)),
+                  _dateLabel(_dateToString(_selectedDate)),
                   style: const TextStyle(
                     color: _kAccent,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: _clearDate,
-                  child: const Icon(Icons.close_rounded, color: _kAccent, size: 14),
-                ),
+                if (!_isToday) ...[
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: _resetToToday,
+                    child: const Icon(Icons.close_rounded, color: _kAccent, size: 14),
+                  ),
+                ],
               ],
             ),
           ),
@@ -283,14 +283,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
       onRefresh: _loadLogs,
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-        itemCount: _listItems.length,
-        itemBuilder: (ctx, i) {
-          final item = _listItems[i];
-          if (item is Map && item['__header'] == true) {
-            return _dateHeader(item['date']?.toString() ?? '');
-          }
-          return _logCard(item as Map<String, dynamic>);
-        },
+        itemCount: _logs.length,
+        itemBuilder: (ctx, i) => _logCard(_logs[i]),
       ),
     );
   }
@@ -326,7 +320,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 20),
             const Text(
-              'Failed to load history',
+              "Couldn't load your history",
               style: TextStyle(color: _kText, fontSize: 17, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
@@ -370,16 +364,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              _selectedDate != null
-                  ? 'No attendance records for ${_formatDisplayDate(_dateToString(_selectedDate!))}.'
-                  : 'Your attendance history will appear here.',
+              _isToday
+                  ? 'No attendance records for today.'
+                  : 'No attendance records for ${_formatDisplayDate(_dateToString(_selectedDate))}.',
               textAlign: TextAlign.center,
               style: const TextStyle(color: _kMuted, fontSize: 13, height: 1.5),
             ),
-            if (_selectedDate != null) ...[
+            if (!_isToday) ...[
               const SizedBox(height: 20),
               GestureDetector(
-                onTap: _clearDate,
+                onTap: _resetToToday,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                   decoration: BoxDecoration(
@@ -387,7 +381,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: _kAccent.withValues(alpha: 0.3)),
                   ),
-                  child: const Text('Clear Filter',
+                  child: const Text('Back to Today',
                       style: TextStyle(color: _kAccent, fontWeight: FontWeight.w600)),
                 ),
               ),
@@ -427,42 +421,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  // ── Date section header ───────────────────────────────────────────────────
-
-  Widget _dateHeader(String rawDate) {
-    final now   = DateTime.now();
-    final today = _dateToString(now);
-    final yesterday = _dateToString(now.subtract(const Duration(days: 1)));
-
-    String label;
-    if (rawDate == today) {
-      label = 'Today  •  ${_formatDisplayDate(rawDate)}';
-    } else if (rawDate == yesterday) {
-      label = 'Yesterday  •  ${_formatDisplayDate(rawDate)}';
-    } else {
-      label = _formatDisplayDate(rawDate);
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10, top: 6),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              color: _kSub,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Divider(color: _kBorder, height: 1)),
-        ],
       ),
     );
   }

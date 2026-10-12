@@ -6,9 +6,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import '../models/employee.dart';
 import '../models/job.dart';
+import '../models/pending_event.dart';
+import '../models/zone.dart';
 import '../services/event_service.dart';
 import '../services/job_service.dart';
 import '../services/storage_service.dart';
+import '../services/sync_service.dart';
+import '../services/zone_service.dart';
+import '../utils/error_utils.dart';
 import 'camera_screen.dart';
 
 enum _LocStatus { idle, fetching, success, error, denied, permanentlyDenied, serviceDisabled }
@@ -48,6 +53,12 @@ class _EventScreenState extends State<EventScreen> {
   bool _jobsLoading = false;
   String? _jobsError;
 
+  // Zones (for resolving zone_name / project_name from GPS)
+  List<Zone> _zones = [];
+  bool _zonesLoaded = false;
+  // Zone control: the company only allows check-in / check-out inside a zone.
+  bool _restrictToZones = false;
+
   // Submit
   bool _submitting = false;
 
@@ -57,6 +68,31 @@ class _EventScreenState extends State<EventScreen> {
 
   bool get _showJobs => widget.flag == 'CHECK_IN' || widget.flag == 'CHECK_OUT';
   bool get _selfieRequired => _showJobs;
+  bool get _mustBeInZone => _restrictToZones && _showJobs;
+
+  /// The zone the employee is standing in right now, if any.
+  Zone? get _currentZone =>
+      _locStatus == _LocStatus.success && _lat != null && _lng != null
+          ? ZoneService.matchZone(_zones, _lat!, _lng!)
+          : null;
+
+  /// Why zone control blocks this check-in / check-out, or null if allowed.
+  String? get _zoneProblem {
+    if (!_mustBeInZone) return null;
+    if (_locStatus != _LocStatus.success || _lat == null || _lng == null) {
+      return 'Your location is needed. Your company only allows check-in and '
+          'check-out inside a work zone. Turn on location (GPS) and try again.';
+    }
+    if (_zones.isEmpty) {
+      return 'Your company only allows check-in and check-out inside a work '
+          'zone, but no work zones are set up yet. Please contact your admin.';
+    }
+    if (_currentZone == null) {
+      return 'You are outside your work zone. Check-in and check-out are only '
+          'allowed inside a work zone. Please move inside the zone and try again.';
+    }
+    return null;
+  }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -69,6 +105,7 @@ class _EventScreenState extends State<EventScreen> {
     );
     _initLocation();
     if (_showJobs) _fetchJobs();
+    _fetchZones();
   }
 
   @override
@@ -200,11 +237,31 @@ class _EventScreenState extends State<EventScreen> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _jobsError = e.toString().replaceFirst('Exception: ', '');
+          _jobsError = friendlyError(e);
           _jobsLoading = false;
         });
       }
     }
+  }
+
+  // ── Zones ─────────────────────────────────────────────────────────────────
+
+  /// Best-effort: loads the company's geofence zones so we can resolve the
+  /// GPS point to a real zone_name (and therefore project_name) at submit
+  /// time, plus its zone control switch. Failure here is silent — _submit()
+  /// just falls back to the reverse-geocoded address (the backend still
+  /// enforces zone control).
+  Future<void> _fetchZones() async {
+    try {
+      final setup = await ZoneService.getZoneSetup(widget.employee.companyCode);
+      if (mounted) {
+        setState(() {
+          _zones = setup.zones;
+          _restrictToZones = setup.restrictToZones;
+          _zonesLoaded = true;
+        });
+      }
+    } catch (_) {}
   }
 
   // ── Camera ────────────────────────────────────────────────────────────────
@@ -240,6 +297,15 @@ class _EventScreenState extends State<EventScreen> {
       return;
     }
 
+    // Zone control: check-in / check-out only inside one of the company's zones.
+    if (_showJobs && !_zonesLoaded) await _fetchZones();
+    if (!mounted) return;
+    final zoneProblem = _zoneProblem;
+    if (zoneProblem != null) {
+      _showErrorSnack(zoneProblem);
+      return;
+    }
+
     if (_locStatus != _LocStatus.success) {
       final proceed = await showDialog<bool>(
         context: context,
@@ -272,17 +338,32 @@ class _EventScreenState extends State<EventScreen> {
 
     setState(() => _submitting = true);
 
+    // Replay any earlier offline check-in/check-out first, so this one
+    // reaches the backend in the right order behind it.
+    await SyncService.flush();
+
+    String? selfieBase64;
+    if (_selfiePath != null) {
+      final bytes = await File(_selfiePath!).readAsBytes();
+      selfieBase64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    }
+
+    final now  = DateTime.now();
+    final date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+
+    // Resolve the GPS point to a configured geofence zone (so the backend
+    // can look up its linked project) — falls back to the reverse-geocoded
+    // address when there's no matching zone or zones failed to load.
+    Zone? matchedZone;
+    if (_locStatus == _LocStatus.success && _lat != null && _lng != null) {
+      if (_zones.isEmpty) await _fetchZones();
+      matchedZone = ZoneService.matchZone(_zones, _lat!, _lng!);
+    }
+    final zoneName = matchedZone?.zoneName ??
+        (_locStatus == _LocStatus.success ? _address : 'Unknown Location');
+
     try {
-      String? selfieBase64;
-      if (_selfiePath != null) {
-        final bytes = await File(_selfiePath!).readAsBytes();
-        selfieBase64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-      }
-
-      final now  = DateTime.now();
-      final date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-      final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
-
       final result = await EventService.sendEvent(
         flag: widget.flag,
         companyCode: widget.employee.companyCode,
@@ -290,7 +371,7 @@ class _EventScreenState extends State<EventScreen> {
         employeeName: widget.employee.employeeName,
         prCode: widget.employee.prCode,
         employeeDomain: _selectedJob?.jobName ?? widget.employee.employeeDomain,
-        zoneName: _locStatus == _LocStatus.success ? _address : 'Unknown Location',
+        zoneName: zoneName,
         attendanceDate: date,
         attendanceTime: time,
         selfieImgBase64: selfieBase64,
@@ -311,30 +392,128 @@ class _EventScreenState extends State<EventScreen> {
         _showSuccessDialog(result);
       }
     } catch (e) {
+      debugPrint('Event submit error (${e.runtimeType}): $e');
+      if (!isConnectivityError(e)) {
+        if (mounted) {
+          setState(() => _submitting = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.error_outline_rounded, color: Colors.white, size: 18),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      friendlyError(e),
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFFB91C1C),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            ),
+          );
+        }
+        return;
+      }
+
+      // No signal / server unreachable — save it locally and sync later
+      // instead of making the employee lose their check-in/check-out.
+      await SyncService.queue(PendingEvent(
+        id: '${widget.employee.employeeId}_${now.millisecondsSinceEpoch}',
+        flag: widget.flag,
+        companyCode: widget.employee.companyCode,
+        employeeId: widget.employee.employeeId,
+        employeeName: widget.employee.employeeName,
+        prCode: widget.employee.prCode,
+        employeeDomain: _selectedJob?.jobName ?? widget.employee.employeeDomain,
+        zoneName: zoneName,
+        attendanceDate: date,
+        attendanceTime: time,
+        selfieImgBase64: selfieBase64,
+        jobId: _selectedJob?.id?.toString(),
+        jobName: _selectedJob?.jobName,
+        accessToken: widget.employee.accessToken,
+        latitude: _lat,
+        longitude: _lng,
+        queuedAt: now.toIso8601String(),
+      ));
+
       if (mounted) {
         setState(() => _submitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.error_outline_rounded, color: Colors.white, size: 18),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    e.toString().replaceFirst('Exception: ', ''),
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-              ],
-            ),
-            backgroundColor: const Color(0xFFB91C1C),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          ),
-        );
+        _showQueuedDialog();
       }
     }
+  }
+
+  void _showErrorSnack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.wrong_location_rounded, color: Colors.white, size: 18),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(message, style: const TextStyle(color: Colors.white, fontSize: 13)),
+            ),
+          ],
+        ),
+        backgroundColor: const Color(0xFFB91C1C),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      ),
+    );
+  }
+
+  void _showQueuedDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: _kSurface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _kWarning.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.cloud_off_rounded, color: _kWarning, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                '$_flagLabel Saved Offline',
+                style: const TextStyle(color: _kText, fontSize: 17, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          "No internet connection right now. Your check-in/out has been "
+          'saved on this phone and will be sent automatically as soon as '
+          "you're back online. Don't uninstall the app or clear its data "
+          'until it syncs.',
+          style: TextStyle(color: _kSub, height: 1.5),
+        ),
+        actions: [
+          _dialogButton(
+            'OK',
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.pop(context, widget.flag);
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   void _showSuccessDialog(Map<String, dynamic> result) {
@@ -382,10 +561,15 @@ class _EventScreenState extends State<EventScreen> {
                   if (result['total_break_hours'] != null)
                     _dialogRow(Icons.coffee_rounded, 'Break Hours',
                         result['total_break_hours'].toString()),
+                  if (result['project_name'] != null)
+                    _dialogRow(Icons.apartment_rounded, 'Project',
+                        result['project_name'].toString()),
                   _dialogRow(
                     Icons.location_on_rounded,
                     'Location',
-                    _locStatus == _LocStatus.success ? _address : 'Unknown Location',
+                    (result['zone_name']?.toString().trim().isNotEmpty ?? false)
+                        ? result['zone_name'].toString()
+                        : (_locStatus == _LocStatus.success ? _address : 'Unknown Location'),
                   ),
                 ],
               ),
@@ -700,6 +884,10 @@ class _EventScreenState extends State<EventScreen> {
                 ),
               ),
             ],
+            if (_mustBeInZone) ...[
+              const SizedBox(height: 10),
+              _zoneStatusChip(),
+            ],
           ],
         );
 
@@ -709,7 +897,7 @@ class _EventScreenState extends State<EventScreen> {
             const Icon(Icons.location_off_rounded, color: Color(0xFFEF4444), size: 18),
             const SizedBox(width: 8),
             const Expanded(
-              child: Text('Failed to fetch location',
+              child: Text("Couldn't find your location. Move to an open area and tap Retry.",
                   style: TextStyle(color: Color(0xFFEF4444), fontSize: 13)),
             ),
             TextButton(
@@ -721,14 +909,14 @@ class _EventScreenState extends State<EventScreen> {
 
       case _LocStatus.denied:
         return _permissionBanner(
-          'Location permission denied.',
+          'Location access is needed to record where you check in. Tap below to allow it.',
           actionLabel: 'Grant Permission',
           onAction: _initLocation,
         );
 
       case _LocStatus.permanentlyDenied:
         return _permissionBanner(
-          'Location permission permanently denied.',
+          'Location access is turned off for this app. Open Settings and allow location access.',
           actionLabel: 'Open App Settings',
           onAction: () async {
             await Geolocator.openAppSettings();
@@ -738,7 +926,7 @@ class _EventScreenState extends State<EventScreen> {
 
       case _LocStatus.serviceDisabled:
         return _permissionBanner(
-          'Location services are disabled.',
+          "Your phone's location (GPS) is turned off. Please turn it on to continue.",
           actionLabel: 'Enable GPS',
           onAction: () async {
             await Geolocator.openLocationSettings();
@@ -746,6 +934,35 @@ class _EventScreenState extends State<EventScreen> {
           },
         );
     }
+  }
+
+  /// Zone control status under the location: inside which zone, or outside.
+  Widget _zoneStatusChip() {
+    final zone = _currentZone;
+    final inside = zone != null;
+    final color = inside ? _kSuccess : const Color(0xFFEF4444);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(inside ? Icons.verified_rounded : Icons.wrong_location_rounded,
+              color: color, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              inside
+                  ? 'Inside work zone: ${zone.zoneName}'
+                  : 'Outside your work zone. Check-in and check-out are only allowed inside a zone.',
+              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _permissionBanner(String msg,

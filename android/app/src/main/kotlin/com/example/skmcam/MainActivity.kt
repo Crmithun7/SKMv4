@@ -1,4 +1,4 @@
-package com.example.skmcam
+package com.skm.skmv4
 
 import io.flutter.embedding.android.FlutterActivity
 

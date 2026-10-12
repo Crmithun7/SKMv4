@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import '../utils/error_utils.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -17,6 +18,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   int _selectedCameraIndex = 0;
   bool _isInitialized = false;
   bool _isCapturing = false;
+  String? _cameraError;
   XFile? _capturedFile;
 
   @override
@@ -27,9 +29,13 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Future<void> _initCameras() async {
+    if (mounted) setState(() => _cameraError = null);
     try {
       _cameras = await availableCameras();
-      if (_cameras.isEmpty) return;
+      if (_cameras.isEmpty) {
+        if (mounted) setState(() => _cameraError = 'No camera was found on this phone.');
+        return;
+      }
       _selectedCameraIndex = _cameras.indexWhere(
         (c) => c.lensDirection == CameraLensDirection.front,
       );
@@ -37,6 +43,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       await _startController(_selectedCameraIndex);
     } catch (e) {
       debugPrint('Camera init error: $e');
+      if (mounted) setState(() => _cameraError = friendlyError(e));
     }
   }
 
@@ -54,6 +61,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       if (mounted) setState(() => _isInitialized = true);
     } catch (e) {
       debugPrint('Controller init error: $e');
+      if (mounted) setState(() => _cameraError = friendlyError(e));
     }
   }
 
@@ -69,13 +77,23 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     setState(() => _isCapturing = true);
     try {
       final file = await _controller!.takePicture();
+      if (!mounted) return;
       setState(() {
         _capturedFile = file;
         _isCapturing = false;
       });
     } catch (e) {
-      setState(() => _isCapturing = false);
       debugPrint('Capture error: $e');
+      if (!mounted) return;
+      setState(() => _isCapturing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(friendlyError(e,
+              fallback: "Couldn't take the photo. Please try again.")),
+          backgroundColor: const Color(0xFFEF4444),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -122,6 +140,35 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
             child: AspectRatio(
               aspectRatio: _controller!.value.aspectRatio,
               child: CameraPreview(_controller!),
+            ),
+          )
+        else if (_cameraError != null)
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.no_photography_outlined,
+                      color: Colors.white70, size: 48),
+                  const SizedBox(height: 16),
+                  Text(
+                    _cameraError!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    onPressed: _initCameras,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Try Again'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _kAccent,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
             ),
           )
         else

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/employee.dart';
 import '../services/employee_service.dart';
 import '../services/storage_service.dart';
+import '../utils/error_utils.dart';
 import 'login_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -285,7 +286,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       headerIcon: Icons.info_outline_rounded,
       children: [
         _infoRow(Icons.badge_outlined, 'Employee ID', e.employeeId),
-        _infoRow(Icons.login_rounded, 'Login Code', e.employeeId),
         _infoRow(Icons.business_rounded, 'Company', e.companyName),
         _infoRow(Icons.qr_code_rounded, 'Company Code', e.companyCode),
         if (e.prCode != null && e.prCode!.isNotEmpty)
@@ -551,7 +551,7 @@ class _ChangePasswordSheetState extends State<_ChangePasswordSheet> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  e.toString().replaceFirst('Exception: ', ''),
+                  friendlyError(e),
                   style: const TextStyle(color: Colors.white, fontSize: 13),
                 ),
               ),
@@ -646,7 +646,7 @@ class _ChangePasswordSheetState extends State<_ChangePasswordSheet> {
               onToggle: () => setState(() => _obscureNew = !_obscureNew),
               validator: (v) {
                 if (v == null || v.isEmpty) return 'Enter a new password';
-                if (v.length < 4) return 'Minimum 4 characters required';
+                if (v.length < 4) return 'Password must be at least 4 characters';
                 return null;
               },
             ),

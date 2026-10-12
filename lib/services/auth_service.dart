@@ -1,35 +1,43 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../utils/error_utils.dart';
 import '../models/employee.dart';
 
 class AuthService {
   static const String _baseUrl = 'https://api.skm-tas.com'; // Android emulator → localhost
 
+  // The SKM super admin grants each company access per application; this
+  // header tells the backend the request comes from the skmv4 mobile app.
+  static const Map<String, String> appHeaders = {'X-SKM-App': 'skmv4'};
+
   static Future<Employee> login(String loginCode, String password) async {
     final response = await http.post(
       Uri.parse('$_baseUrl/api/v1/auth/login'),
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', ...appHeaders},
       body: jsonEncode({'login_code': loginCode, 'password': password}),
+    ).timeout(
+      const Duration(seconds: 20),
+      onTimeout: () => throw Exception(slowNetworkMessage),
     );
+
+    if (response.statusCode == 401) {
+      throw Exception('Incorrect login code or password. Please check and try again.');
+    }
+    if (response.statusCode != 200) {
+      throw Exception(serverErrorMessage(response,
+          fallback: "Couldn't log you in. Please try again."));
+    }
 
     dynamic data;
     try {
       data = jsonDecode(response.body);
     } catch (_) {
-      throw Exception('Server returned an unexpected response. Please try again.');
+      throw Exception(badReplyMessage);
     }
 
-    if (response.statusCode == 200) {
-      if (data is! Map<String, dynamic>) {
-        throw Exception('Unexpected server response. Please try again.');
-      }
-      return Employee.fromJson(data);
-    } else if (response.statusCode == 403) {
-      throw Exception((data is Map ? data['detail'] : null) ?? 'Account blocked. Contact admin.');
-    } else if (response.statusCode == 401) {
-      throw Exception('Invalid login code or password.');
-    } else {
-      throw Exception((data is Map ? data['detail'] : null) ?? 'Login failed. Try again.');
+    if (data is! Map<String, dynamic>) {
+      throw Exception(badReplyMessage);
     }
+    return Employee.fromJson(data);
   }
 }
